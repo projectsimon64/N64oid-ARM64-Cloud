@@ -1,0 +1,87 @@
+name: N64oid ARM64 native compilation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - ".github/workflows/n64oid-arm64-native-build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-arm64-core:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Install Android NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "ndk;27.2.12479018"
+
+      - name: Download and extract verified N64oid source
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            "https://github.com/projectsimon64/N64oid-ARM64-Cloud/releases/download/Release-v1/N64oid-ARM64-Complete-Merged-Package.zip" \
+            -o "$RUNNER_TEMP/n64oid-source.zip"
+          mkdir -p "$RUNNER_TEMP/n64oid-source"
+          unzip -q "$RUNNER_TEMP/n64oid-source.zip" -d "$RUNNER_TEMP/n64oid-source"
+          python3 "$RUNNER_TEMP/n64oid-source/scripts/source_audit.py"
+
+      - name: Build Mupen64Plus Core for Android arm64-v8a
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="$RUNNER_TEMP/n64oid-source/source/mupen64plus-core-2.6.0"
+          NDK="$ANDROID_HOME/ndk/27.2.12479018"
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          OUT="$RUNNER_TEMP/package"
+          ABI="$OUT/lib/arm64-v8a"
+          mkdir -p "$ABI"
+
+          make -C "$SRC/projects/unix" clean
+          make -C "$SRC/projects/unix" -j"$(nproc)" V=1 \
+            OS=LINUX HOST_CPU=aarch64 NEW_DYNAREC=1 PIC=1 \
+            OSD=0 VULKAN=0 NETPLAY=0 DEBUGGER=0 \
+            OPTFLAGS=-O2 WARNFLAGS= \
+            CC="$BIN/aarch64-linux-android21-clang" \
+            CXX="$BIN/aarch64-linux-android21-clang++" \
+            AR="$BIN/llvm-ar" RANLIB="$BIN/llvm-ranlib" \
+            STRINGS="$BIN/llvm-strings" PKG_CONFIG=/usr/bin/false
+
+          CORE="$SRC/projects/unix/libmupen64plus.so.2.0.0"
+          test -s "$CORE"
+          cp "$CORE" "$ABI/libmupen64plus-core.so"
+          cp "$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" "$ABI/"
+          cp "$RUNNER_TEMP/n64oid-source.zip" "$OUT/N64oid-ARM64-source-original.zip"
+
+      - name: Verify architecture, exports, and package contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="$ANDROID_HOME/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CORE="$RUNNER_TEMP/package/lib/arm64-v8a/libmupen64plus-core.so"
+          "$BIN/llvm-readelf" -h "$CORE" | grep -q 'ELF64'
+          "$BIN/llvm-readelf" -h "$CORE" | grep -q 'AArch64'
+          "$BIN/llvm-nm" -D --defined-only "$CORE" | grep -q 'CoreGetAPIVersions'
+          mkdir -p "$RUNNER_TEMP/package/docs"
+          cat > "$RUNNER_TEMP/package/docs/ARM64-BUILD-STATUS.txt" <<'EOF'
+          N64oid ARM64 compilation stage 1
+          Built: libmupen64plus-core.so (Android arm64-v8a / ELF64 AArch64)
+          Included: libc++_shared.so and original verified source ZIP.
+          Not yet built: libn64.so JNI bridge, audio, input, video, and RSP-HLE plugins.
+          This is a partial native build, not a complete installable N64oid ARM64 port.
+          EOF
+          cd "$RUNNER_TEMP/package"
+          zip -qr "$RUNNER_TEMP/N64oid-ARM64-Stage1.zip" .
+
+      - name: Upload updated ARM64 package
+        uses: actions/upload-artifact@v4
+        with:
+          name: N64oid-ARM64-Stage1
+          path: ${{ runner.temp }}/N64oid-ARM64-Stage1.zip
+          if-no-files-found: error
+          compression-level: 6
