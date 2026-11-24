@@ -1,0 +1,113 @@
+name: N64oid ARM64 native build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - ".github/workflows/n64oid-arm64-build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-arm64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Android NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "ndk;27.2.12479018"
+
+      - name: Download and extract N64oid source package
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            "https://github.com/projectsimon64/N64oid-ARM64-Cloud/releases/download/Release-v1/N64oid-ARM64-Complete-Merged-Package.zip" \
+            --output "$RUNNER_TEMP/n64oid-source.zip"
+          mkdir -p "$RUNNER_TEMP/n64oid-source"
+          unzip -q "$RUNNER_TEMP/n64oid-source.zip" -d "$RUNNER_TEMP/n64oid-source"
+          python3 "$RUNNER_TEMP/n64oid-source/scripts/source_audit.py"
+
+      - name: Build Mupen64Plus Core 2.6.0 with the AArch64 dynarec
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="$RUNNER_TEMP/n64oid-source/source/mupen64plus-core-2.6.0"
+          NDK="$ANDROID_HOME/ndk/27.2.12479018"
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          mkdir -p "$RUNNER_TEMP/arm64-libs"
+
+          make -C "$SRC/projects/unix" -j"$(nproc)" \
+            HOST_CPU=aarch64 \
+            NEW_DYNAREC=1 \
+            PIC=1 \
+            OSD=0 \
+            VULKAN=0 \
+            NETPLAY=0 \
+            DEBUGGER=0 \
+            OPTFLAGS=-O2 \
+            WARNFLAGS= \
+            CC="$TOOLCHAIN/aarch64-linux-android21-clang" \
+            CXX="$TOOLCHAIN/aarch64-linux-android21-clang++" \
+            AR="$TOOLCHAIN/llvm-ar" \
+            RANLIB="$TOOLCHAIN/llvm-ranlib" \
+            STRINGS="$TOOLCHAIN/llvm-strings" \
+            PKG_CONFIG=/usr/bin/false \
+            ZLIB_CFLAGS= \
+            ZLIB_LDLIBS=-lz \
+            MINIZIP_CFLAGS="-DNOCRYPT -DNOUNCRYPT -I../../subprojects/minizip" \
+            MINIZIP_SOURCE="../../subprojects/minizip/ioapi.c ../../subprojects/minizip/zip.c ../../subprojects/minizip/unzip.c" \
+            MINIZIP_LDLIBS= \
+            LIBPNG_CFLAGS= \
+            LIBPNG_LDLIBS= \
+            SDL_CFLAGS= \
+            SDL_LDLIBS=
+
+          CORE_SO="$(find "$SRC/projects/unix" -maxdepth 2 -type f -name 'libmupen64plus*.so.2.0.0' -print -quit)"
+          test -n "$CORE_SO"
+          cp "$CORE_SO" "$RUNNER_TEMP/arm64-libs/libmupen64plus-core.so"
+
+          # Confirm the new AArch64 dynarec objects were actually compiled.
+          test -s "$SRC/projects/unix/_obj/device/r4300/new_dynarec/new_dynarec.o"
+          test -s "$SRC/projects/unix/_obj/device/r4300/new_dynarec/arm64/linkage_arm64.o"
+
+      - name: Include the NDK C++ runtime required by the linker
+        shell: bash
+        run: |
+          set -euo pipefail
+          NDK="$ANDROID_HOME/ndk/27.2.12479018"
+          cp "$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" \
+            "$RUNNER_TEMP/arm64-libs/libc++_shared.so"
+
+      - name: Verify outputs are real AArch64 ELF libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          NDK="$ANDROID_HOME/ndk/27.2.12479018"
+          READELF="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          NM="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+
+          for so in "$RUNNER_TEMP"/arm64-libs/*.so; do
+            echo "===== $so ====="
+            "$READELF" -h "$so" | grep -E 'Class:|Machine:'
+            "$READELF" -h "$so" | grep -q 'ELF64'
+            "$READELF" -h "$so" | grep -q 'AArch64'
+            test -s "$so"
+          done
+
+          "$NM" -D --defined-only "$RUNNER_TEMP/arm64-libs/libmupen64plus-core.so" \
+            | grep -q 'CoreGetAPIVersions'
+
+      - name: Upload ARM64 native library artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: n64oid-arm64-native-libs-stage1
+          path: ${{ runner.temp }}/arm64-libs/*.so
+          if-no-files-found: error
+          compression-level: 6
