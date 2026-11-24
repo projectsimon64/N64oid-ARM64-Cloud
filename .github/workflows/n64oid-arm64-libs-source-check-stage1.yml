@@ -1,0 +1,106 @@
+name: N64oid ARM64 Core build (stage 1)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - ".github/workflows/n64oid-arm64-core-build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-core:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Install Android NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "ndk;27.2.12479018"
+
+      - name: Download and verify N64oid source package
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            "https://github.com/projectsimon64/N64oid-ARM64-Cloud/releases/download/Release-v1/N64oid-ARM64-Complete-Merged-Package.zip" \
+            --output "$RUNNER_TEMP/n64oid-source.zip"
+          mkdir -p "$RUNNER_TEMP/n64oid-source"
+          unzip -q "$RUNNER_TEMP/n64oid-source.zip" -d "$RUNNER_TEMP/n64oid-source"
+          python3 "$RUNNER_TEMP/n64oid-source/scripts/source_audit.py"
+
+      - name: Build Mupen64Plus Core 2.6.0 for arm64-v8a
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="$RUNNER_TEMP/n64oid-source/source/mupen64plus-core-2.6.0"
+          NDK="$ANDROID_HOME/ndk/27.2.12479018"
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          OUT="$RUNNER_TEMP/arm64-libs"
+          mkdir -p "$OUT"
+
+          # HOST_CPU=aarch64 makes this Makefile select CPU=ARM,
+          # ARCH_DETECTED=64BITS and DYNAREC=arm64.
+          make -C "$SRC/projects/unix" -j"$(nproc)" V=1 \
+            HOST_CPU=aarch64 \
+            NEW_DYNAREC=1 \
+            PIC=1 \
+            OSD=0 \
+            VULKAN=0 \
+            NETPLAY=0 \
+            DEBUGGER=0 \
+            OPTFLAGS=-O2 \
+            WARNFLAGS= \
+            CC="$BIN/aarch64-linux-android21-clang" \
+            CXX="$BIN/aarch64-linux-android21-clang++" \
+            AR="$BIN/llvm-ar" \
+            RANLIB="$BIN/llvm-ranlib" \
+            STRINGS="$BIN/llvm-strings" \
+            PKG_CONFIG=/usr/bin/false \
+            ZLIB_CFLAGS= \
+            ZLIB_LDLIBS=-lz \
+            MINIZIP_CFLAGS="-DNOCRYPT -DNOUNCRYPT -I../../subprojects/minizip" \
+            MINIZIP_SOURCE="../../subprojects/minizip/ioapi.c ../../subprojects/minizip/zip.c ../../subprojects/minizip/unzip.c" \
+            MINIZIP_LDLIBS= \
+            LIBPNG_CFLAGS= \
+            LIBPNG_LDLIBS= \
+            SDL_CFLAGS= \
+            SDL_LDLIBS=
+
+          CORE="$SRC/projects/unix/libmupen64plus.so.2.0.0"
+          test -s "$CORE"
+          cp "$CORE" "$OUT/libmupen64plus-core.so"
+
+          # Ensure both the generic new dynarec and its ARM64 assembly object exist.
+          test -s "$SRC/projects/unix/_obj/device/r4300/new_dynarec/new_dynarec.o"
+          test -s "$SRC/projects/unix/_obj/device/r4300/new_dynarec/arm64/linkage_arm64.o"
+
+      - name: Add Android C++ shared runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          NDK="$ANDROID_HOME/ndk/27.2.12479018"
+          RUNTIME="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
+          test -s "$RUNTIME"
+          cp "$RUNTIME" "$RUNNER_TEMP/arm64-libs/libc++_shared.so"
+
+      - name: Verify the Core is a real AArch64 ELF64 shared library
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="$ANDROID_HOME/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CORE="$RUNNER_TEMP/arm64-libs/libmupen64plus-core.so"
+          "$BIN/llvm-readelf" -h "$CORE" | grep -E 'Class:|Machine:'
+          "$BIN/llvm-readelf" -h "$CORE" | grep -q 'ELF64'
+          "$BIN/llvm-readelf" -h "$CORE" | grep -q 'AArch64'
+          "$BIN/llvm-nm" -D --defined-only "$CORE" | grep -q 'CoreGetAPIVersions'
+
+      - name: Upload ARM64 Core build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: n64oid-arm64-core-stage1
+          path: ${{ runner.temp }}/arm64-libs/*.so
+          if-no-files-found: error
+          compression-level: 6
