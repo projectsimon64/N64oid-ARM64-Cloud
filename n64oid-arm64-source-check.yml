@@ -1,0 +1,38 @@
+name: N64oid ARM64 cloud source check
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  source-check:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download merged N64oid source package
+        run: |
+          curl --fail --location --retry 3 \
+            "https://github.com/projectsimon64/N64oid-ARM64-Cloud/releases/download/Release-v1/N64oid-ARM64-Complete-Merged-Package.zip" \
+            --output "$RUNNER_TEMP/n64oid-source.zip"
+          unzip -t "$RUNNER_TEMP/n64oid-source.zip"
+
+      - name: Extract source package
+        run: |
+          mkdir -p "$RUNNER_TEMP/n64oid-source"
+          unzip -q "$RUNNER_TEMP/n64oid-source.zip" -d "$RUNNER_TEMP/n64oid-source"
+
+      - name: Verify source and AArch64 dynarec inputs
+        run: |
+          python3 "$RUNNER_TEMP/n64oid-source/scripts/source_audit.py"
+          test -s "$RUNNER_TEMP/n64oid-source/source/mupen64plus-core-2.6.0/src/device/r4300/new_dynarec/arm64/assem_arm64.c"
+
+      - name: Publish verified source as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: n64oid-arm64-verified-source
+          path: ${{ runner.temp }}/n64oid-source/
+          if-no-files-found: error
+          compression-level: 6
